@@ -54,6 +54,7 @@ const MAX_PARTNER_ATTEMPTS = 1;
 // continue to request 1, while this cap safely permits the interactive choice.
 const MAX_PARTNER_CONCURRENCY = 5;
 const PARTNER_TIMEOUT_MS = 30000;
+const MAX_RETURNED_RESPONSE_CHARS = 500;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const STOPPED_STATUSES = new Set(["Cancelled", "Paused", "Stopped"]);
 
@@ -229,6 +230,13 @@ function stoppedResult() {
     response: "Processing was stopped before this lead was sent",
     httpStatus: 0,
   };
+}
+
+function summarizeResponse(value: string): string {
+  if (!value) return "";
+  return value.length > MAX_RETURNED_RESPONSE_CHARS
+    ? `${value.slice(0, MAX_RETURNED_RESPONSE_CHARS)}... [truncated]`
+    : value;
 }
 
 function resolvePartnerTimeoutMs(apiConfig: LeadPayload["apiConfig"]): number {
@@ -536,7 +544,7 @@ async function processOne(
     } catch (e) { console.error("Stats upsert failed:", e); }
   }
 
-  return { success: status === "Success", status, response: responseBody, httpStatus };
+  return { success: status === "Success", status, response: summarizeResponse(responseBody), httpStatus };
 }
 
 // ---------- Payload builder (extracted so both single + batch use it) ----------

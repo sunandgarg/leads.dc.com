@@ -126,7 +126,7 @@ async function handleLandingPagePush(
   // Fetch all target universities
   const { data: unis } = await supabase
     .from("universities")
-    .select("*")
+    .select("id,name,api_url,secret_key,college_id,source,medium,campaign,api_type,column_mapping,custom_headers,auth_type,auth_header_key,auth_header_value,payload_wrapper,default_values,api_timeout_seconds")
     .in("id", universityIds);
   if (!unis || !unis.length) return { status: 404, body: { success: false, error: "No matching universities" } };
 
@@ -156,6 +156,10 @@ async function handleLandingPagePush(
           file_name: `LandingPage: ${lp.name}`,
           total_leads: 1,
           status: "processing",
+          is_paused: false,
+          is_cancelled: false,
+          processed_count: 0,
+          current_lead_index: 0,
         })
         .select("id")
         .single();
@@ -203,7 +207,7 @@ async function handleLandingPagePush(
             "Content-Type": "application/json",
             Authorization: `Bearer ${serviceKey}`,
           },
-          body: JSON.stringify({ batchId: batchByUni[uni.id], leadData, apiConfig }),
+          body: JSON.stringify({ universityId: uni.id, batchId: batchByUni[uni.id], leadData, apiConfig }),
         });
         const json = await res.json().catch(() => ({}));
         return {
@@ -223,7 +227,7 @@ async function handleLandingPagePush(
     Object.values(batchByUni).map((bid) =>
       supabase
         .from("upload_batches")
-        .update({ status: "completed", completed_at: new Date().toISOString() })
+        .update({ status: "completed", completed_at: new Date().toISOString(), processed_count: 1, current_lead_index: 1 })
         .eq("id", bid),
     ),
   );
@@ -317,7 +321,7 @@ Deno.serve(async (req) => {
     // Get university config
     const { data: university, error: uniError } = await supabase
       .from("universities")
-      .select("*")
+      .select("id,name,api_url,secret_key,college_id,source,medium,campaign,api_type,column_mapping,custom_headers,auth_type,auth_header_key,auth_header_value,payload_wrapper,default_values,api_timeout_seconds")
       .eq("id", payload.university_id)
       .single();
 
@@ -331,7 +335,7 @@ Deno.serve(async (req) => {
     // Check automation rules
     const { data: automationRules } = await supabase
       .from("automation_rules")
-      .select("*")
+      .select("id,name,conditions,actions")
       .eq("status", "Active")
       .order("priority", { ascending: true });
 
@@ -386,8 +390,12 @@ Deno.serve(async (req) => {
         file_name: `API_${new Date().toISOString()}`,
         total_leads: 1,
         status: "processing",
+        is_paused: false,
+        is_cancelled: false,
+        processed_count: 0,
+        current_lead_index: 0,
       })
-      .select()
+      .select("id")
       .single();
 
     if (batchError) {
@@ -397,183 +405,58 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Insert lead
-    const { data: lead, error: leadError } = await supabase
-      .from("leads")
-      .insert({
-        university_id: payload.university_id,
-        batch_id: batch.id,
-        name: leadDataForMatching.name,
-        email: leadDataForMatching.email,
-        mobile: leadDataForMatching.mobile,
-        course: leadDataForMatching.course,
-        specialization: leadDataForMatching.specialization,
-        city: leadDataForMatching.city,
-        state: leadDataForMatching.state,
+    const task = {
+      universityId: payload.university_id,
+      batchId: batch.id,
+      sourceLabel: leadDataForMatching.source || payload.source || "",
+      leadData: {
+        ...leadDataForMatching,
         address: payload.address || "",
-        lead_source: leadDataForMatching.source || university.source,
-        lead_medium: payload.medium || university.medium,
-        lead_campaign: leadDataForMatching.campaign || university.campaign,
-        status: "pending",
-      })
-      .select()
-      .single();
+        leadSource: leadDataForMatching.source || university.source,
+        leadMedium: payload.medium || university.medium,
+        leadCampaign: leadDataForMatching.campaign || university.campaign,
+      },
+      apiConfig: {
+        apiUrl: university.api_url,
+        secretKey: university.secret_key,
+        collegeId: university.college_id,
+        source: university.source,
+        medium: university.medium,
+        campaign: university.campaign,
+        apiType: university.api_type || "nopaperforms",
+        columnMapping: university.column_mapping || {},
+        customHeaders: university.custom_headers || {},
+        authType: university.auth_type,
+        authHeaderKey: university.auth_header_key,
+        authHeaderValue: university.auth_header_value,
+        payloadWrapper: university.payload_wrapper,
+        universityDefaults: uniDefaults,
+        apiTimeoutSeconds: university.api_timeout_seconds,
+      },
+    };
 
-    if (leadError) {
-      return new Response(JSON.stringify({ success: false, error: "Failed to insert lead" }), {
+    const { data: processed, error: processError } = await supabase.functions.invoke("process-lead", {
+      body: { tasks: [task], concurrency: 1 },
+    });
+
+    if (processError) {
+      await supabase
+        .from("upload_batches")
+        .update({ status: "completed", completed_at: new Date().toISOString(), processed_count: 1, current_lead_index: 1 })
+        .eq("id", batch.id);
+      return new Response(JSON.stringify({ success: false, error: "Failed to process lead" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Build API payload
-    const columnMapping = typeof university.column_mapping === "object" ? university.column_mapping : {};
-    const staticFields: Record<string, string> = {};
-    const fixedDefaults: Record<string, string> = {};
-
-    Object.entries(columnMapping).forEach(([key, value]) => {
-      if (key.startsWith("__static_") && typeof value === "string") {
-        staticFields[key.replace("__static_", "")] = value;
-      } else if (key.startsWith("__fixed_") && typeof value === "string") {
-        fixedDefaults[key.replace("__fixed_", "")] = value;
-      }
-    });
-
-    Object.entries(fixedDefaults).forEach(([key, val]) => {
-      if (!leadDataForMatching[key]?.trim()) leadDataForMatching[key] = val;
-    });
-
-    let apiPayload: unknown;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-
-    if (university.auth_type === "bearer" && university.auth_header_value) {
-      headers["Authorization"] = `Bearer ${university.auth_header_value}`;
-    } else if (university.auth_type === "custom_header" && university.auth_header_key && university.auth_header_value) {
-      headers[university.auth_header_key] = university.auth_header_value;
-    }
-    if (university.custom_headers && typeof university.custom_headers === "object") {
-      Object.entries(university.custom_headers as Record<string, string>).forEach(([k, v]) => {
-        if (k && v) headers[k] = v;
-      });
-    }
-
-    if (university.api_type === "leadsquared") {
-      const lsPayload: Record<string, string> = {};
-      Object.entries(leadDataForMatching)
-        .filter(([_, v]) => v)
-        .forEach(([key, value]) => {
-          lsPayload[(columnMapping[key] as string) || key] = value;
-        });
-
-      const sourceValue = lsPayload.leadSource || lsPayload.source || "";
-      const mediumValue = lsPayload.leadMedium || lsPayload.medium || "";
-      const campaignValue = lsPayload.leadCampaign || lsPayload.campaign || "";
-
-      delete lsPayload.source;
-      delete lsPayload.medium;
-      delete lsPayload.campaign;
-
-      if (sourceValue) lsPayload.leadSource = sourceValue;
-      if (mediumValue) lsPayload.leadMedium = mediumValue;
-      if (campaignValue) lsPayload.leadCampaign = campaignValue;
-
-      const lsEntries = Object.entries(lsPayload).map(([key, value]) => ({ Attribute: key, Value: value }));
-      Object.entries(staticFields).forEach(([key, value]) => {
-        if (value) lsEntries.push({ Attribute: key, Value: value });
-      });
-      apiPayload = lsEntries;
-    } else {
-      const formData: Record<string, string> = {};
-      Object.entries(leadDataForMatching).forEach(([key, value]) => {
-        if (value) {
-          const mappedKey = typeof columnMapping[key] === "string" ? columnMapping[key] : key;
-          formData[mappedKey] = value;
-        }
-      });
-      formData[(columnMapping["medium"] as string) || "medium"] = payload.medium || university.medium;
-      formData[(columnMapping["campaign"] as string) || "campaign"] =
-        leadDataForMatching.campaign || university.campaign;
-      if (university.college_id) formData.college_id = university.college_id;
-      formData[(columnMapping["source"] as string) || "source"] = leadDataForMatching.source || university.source;
-      if (university.secret_key) formData.secret_key = university.secret_key;
-      Object.entries(staticFields).forEach(([key, value]) => {
-        formData[key] = value;
-      });
-      apiPayload = university.payload_wrapper === "array" ? [formData] : formData;
-    }
-
-    let status: "Success" | "Fail" = "Fail";
-    let responseBody = "";
-
-    try {
-      const apiResponse = await fetch(university.api_url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(apiPayload),
-      });
-      responseBody = await apiResponse.text();
-
-      if (apiResponse.ok) {
-        try {
-          const jr = JSON.parse(responseBody);
-          const rs = responseBody.toLowerCase();
-          const s = String(jr.status || "").toLowerCase();
-          const r = String(jr.result || jr.Result || "").toLowerCase();
-
-          const isDup =
-            rs.includes("duplicate") ||
-            rs.includes("already exist") ||
-            rs.includes("already registered") ||
-            rs.includes("already present") ||
-            jr.errorCode === "DUPLICATE" ||
-            jr.error_code === "duplicate" ||
-            s === "duplicate";
-
-          if (isDup) {
-            status = "Duplicate" as any;
-          } else if (
-            s === "success" ||
-            jr.success === true ||
-            jr.IsCreated === true ||
-            r === "success" ||
-            jr.message === "1"
-          ) {
-            status = "Success";
-          } else {
-            const errMsg = String(jr.error || jr.message || jr.Message || "").toLowerCase();
-            if (errMsg.includes("duplicate") || errMsg.includes("already exist")) {
-              status = "Duplicate" as any;
-            }
-          }
-        } catch {
-          /* not JSON */
-        }
-      } else {
-        const rs = responseBody.toLowerCase();
-        if (apiResponse.status === 409 || rs.includes("duplicate") || rs.includes("already exist")) {
-          status = "Duplicate" as any;
-        }
-      }
-    } catch (fetchError) {
-      console.error("API call failed:", fetchError);
-      responseBody = JSON.stringify({ error: String(fetchError) });
-    }
-
-    // Update lead + batch - NO API LOG INSERTION
-    // Duplicates count as "success" for batch tracking
-    await Promise.allSettled([
-      supabase
-        .from("leads")
-        .update({ status, api_response: responseBody, processed_at: new Date().toISOString() })
-        .eq("id", lead.id),
-      status === "Success" || status === "Duplicate"
-        ? supabase.rpc("increment_batch_success", { batch_uuid: batch.id })
-        : supabase.rpc("increment_batch_fail", { batch_uuid: batch.id }),
-      supabase
-        .from("upload_batches")
-        .update({ status: "completed", completed_at: new Date().toISOString() })
-        .eq("id", batch.id),
-    ]);
+    const result = Array.isArray(processed?.results) ? processed.results[0] : processed;
+    const status = result?.status || "Fail";
+    const responseBody = String(result?.response || "");
+    await supabase
+      .from("upload_batches")
+      .update({ status: "completed", completed_at: new Date().toISOString(), processed_count: 1, current_lead_index: 1 })
+      .eq("id", batch.id);
 
     // Log automation result if matched
     if (matchedRuleId) {
@@ -587,7 +470,7 @@ Deno.serve(async (req) => {
         university_name: university.name,
         result: status,
         fail_reason: status === "Fail" ? responseBody.slice(0, 200) : "",
-        lead_data: leadDataForMatching,
+        lead_data: null,
       });
     }
 
@@ -595,7 +478,6 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: status === "Success",
         status,
-        lead_id: lead.id,
         message: status === "Success" ? "Lead processed successfully" : "Lead processing failed",
         response: responseBody,
       }),

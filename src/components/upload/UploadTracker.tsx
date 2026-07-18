@@ -98,7 +98,7 @@ export function UploadTracker({ universities, onViewBatch }: UploadTrackerProps)
       setLoading(true);
       const { data, error } = await supabase
         .from('upload_batches')
-        .select('*')
+        .select('id, university_id, file_name, total_leads, success_count, fail_count, duplicate_count, status, is_paused, is_cancelled, processed_count, current_lead_index, created_at, completed_at, error_message')
         .order('created_at', { ascending: false })
         .limit(100);
 
@@ -135,42 +135,11 @@ export function UploadTracker({ universities, onViewBatch }: UploadTrackerProps)
     }
   };
 
-  // Fetch leads for a batch
+  // Lead Push no longer stores lead-level rows/responses; progress is tracked
+  // through upload_batches counters only.
   const fetchBatchLeads = async (batchId: string) => {
     if (batchLeads.has(batchId)) return;
-
-    setLoadingLeads(prev => new Set(prev).add(batchId));
-    
-    try {
-      const { data, error } = await supabase
-        .from('leads')
-        .select('id, name, email, mobile, status, api_response, retry_count, processed_at')
-        .eq('batch_id', batchId)
-        .order('created_at', { ascending: true });
-
-      if (error) throw error;
-
-      const leads: UploadLead[] = (data || []).map(lead => ({
-        id: lead.id,
-        name: lead.name,
-        email: lead.email,
-        mobile: lead.mobile,
-        status: normalizeLeadStatus(lead.status),
-        apiResponse: lead.api_response || undefined,
-        retryCount: lead.retry_count || 0,
-        processedAt: lead.processed_at || undefined,
-      }));
-
-      setBatchLeads(prev => new Map(prev).set(batchId, leads));
-    } catch (error) {
-      console.error('Error fetching leads:', error);
-    } finally {
-      setLoadingLeads(prev => {
-        const next = new Set(prev);
-        next.delete(batchId);
-        return next;
-      });
-    }
+    setBatchLeads(prev => new Map(prev).set(batchId, []));
   };
 
   // Toggle batch expansion
@@ -214,28 +183,8 @@ export function UploadTracker({ universities, onViewBatch }: UploadTrackerProps)
 
   // Retry failed leads
   const handleRetryFailed = async (batchId: string) => {
-    try {
-      const { error } = await supabase
-        .from('leads')
-        .update({ status: 'pending', retry_count: 0 })
-        .eq('batch_id', batchId)
-        .in('status', ['Fail', 'fail', 'failed']);
-
-      if (error) throw error;
-
-      toast({ title: 'Success', description: 'Failed leads queued for retry' });
-      
-      // Refresh batch leads
-      setBatchLeads(prev => {
-        const next = new Map(prev);
-        next.delete(batchId);
-        return next;
-      });
-      fetchBatchLeads(batchId);
-      fetchBatches();
-    } catch {
-      toast({ title: 'Error', description: 'Failed to retry leads', variant: 'destructive' });
-    }
+    toast({ title: 'Retry unavailable', description: 'Lead-level rows are no longer stored for this batch.' });
+    fetchBatches();
   };
 
   // Export failed leads

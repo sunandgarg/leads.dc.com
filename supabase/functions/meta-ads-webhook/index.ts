@@ -126,7 +126,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // If university_id specified, create batch and insert into leads table for processing
+    // If university_id specified, process leads without persisting individual lead rows.
     if (universityId) {
       const { data: batch } = await supabase
         .from('upload_batches')
@@ -135,54 +135,63 @@ Deno.serve(async (req) => {
           file_name: `Facebook_Ads_${new Date().toISOString()}`,
           total_leads: leads.length,
           status: 'processing',
+          is_paused: false,
+          is_cancelled: false,
+          processed_count: 0,
+          current_lead_index: 0,
         })
-        .select()
+        .select('id')
         .single();
 
       if (batch) {
-        for (const lead of leads) {
-          // Get university defaults for fallback
-          const { data: uni } = await supabase
-            .from('universities')
-            .select('default_values, source, medium, campaign')
-            .eq('id', universityId)
-            .single();
-
-          const defaults = (uni?.default_values as Record<string, string>) || {};
-
-          await supabase.from('leads').insert({
-            university_id: universityId,
-            batch_id: batch.id,
+        const { data: uni } = await supabase
+          .from('universities')
+          .select('api_url, secret_key, college_id, source, medium, campaign, api_type, column_mapping, custom_headers, auth_type, auth_header_key, auth_header_value, payload_wrapper, default_values, api_timeout_seconds')
+          .eq('id', universityId)
+          .single();
+        const defaults = (uni?.default_values as Record<string, string>) || {};
+        const tasks = leads.map((lead) => ({
+          universityId,
+          batchId: batch.id,
+          sourceLabel: 'Facebook Lead Ads',
+          leadData: {
             name: lead.name || defaults.name || 'Facebook Lead',
             email: lead.email || defaults.email || '',
             mobile: lead.mobile || defaults.mobile || '',
             city: lead.city || defaults.city || '',
             state: lead.state || defaults.state || '',
             course: lead.course || defaults.course || '',
-            lead_source: lead.lead_source || uni?.source || 'Facebook Lead Ads',
-            lead_medium: lead.lead_medium || uni?.medium || 'paid',
-            lead_campaign: lead.lead_campaign || uni?.campaign || 'Facebook Campaign',
-            status: 'pending',
-            extra_data: lead.raw_data ? { raw_data: lead.raw_data } : {},
-          });
-        }
-
-        // Trigger processing via process-queue
-        await supabase.functions.invoke('process-queue', {
-          body: { batchId: batch.id, universityId },
+            leadSource: lead.lead_source || uni?.source || 'Facebook Lead Ads',
+            leadMedium: lead.lead_medium || uni?.medium || 'paid',
+            leadCampaign: lead.lead_campaign || uni?.campaign || 'Facebook Campaign',
+          },
+          apiConfig: {
+            apiUrl: uni?.api_url || '',
+            secretKey: uni?.secret_key || '',
+            collegeId: uni?.college_id || '',
+            source: uni?.source || 'Facebook Lead Ads',
+            medium: uni?.medium || 'paid',
+            campaign: uni?.campaign || 'Facebook Campaign',
+            apiType: uni?.api_type || 'nopaperforms',
+            columnMapping: uni?.column_mapping || {},
+            customHeaders: uni?.custom_headers || {},
+            authType: uni?.auth_type,
+            authHeaderKey: uni?.auth_header_key,
+            authHeaderValue: uni?.auth_header_value,
+            payloadWrapper: uni?.payload_wrapper,
+            universityDefaults: defaults,
+            apiTimeoutSeconds: uni?.api_timeout_seconds,
+          },
+        }));
+        await supabase.functions.invoke('process-lead', {
+          body: { tasks, concurrency: 1 },
         });
+        await supabase
+          .from('upload_batches')
+          .update({ status: 'completed', completed_at: new Date().toISOString(), processed_count: leads.length, current_lead_index: leads.length })
+          .eq('id', batch.id);
       }
     }
-
-    // Log the webhook
-    await supabase.from('api_logs').insert({
-      status: 'Success',
-      source: 'Facebook Lead Ads',
-      trigger_point: 'Meta Webhook',
-      response: `Received ${leads.length} leads`,
-      lead_data: body,
-      university_id: universityId || '00000000-0000-0000-0000-000000000000',
-    });
 
     return new Response(
       JSON.stringify({ success: true, leads_received: leads.length }),

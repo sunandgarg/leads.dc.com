@@ -79,7 +79,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Save to leads table if university_id provided
+    // Process webhook leads without persisting individual lead rows.
     if (universityId && leads.length > 0) {
       const { data: batch } = await supabase
         .from('upload_batches')
@@ -88,52 +88,64 @@ Deno.serve(async (req) => {
           file_name: `Google_Ads_${new Date().toISOString()}`,
           total_leads: leads.length,
           status: 'processing',
+          is_paused: false,
+          is_cancelled: false,
+          processed_count: 0,
+          current_lead_index: 0,
         })
-        .select()
+        .select('id')
         .single();
 
       if (batch) {
         const { data: uni } = await supabase
           .from('universities')
-          .select('default_values, source, medium, campaign')
+          .select('api_url, secret_key, college_id, source, medium, campaign, api_type, column_mapping, custom_headers, auth_type, auth_header_key, auth_header_value, payload_wrapper, default_values, api_timeout_seconds')
           .eq('id', universityId)
           .single();
 
         const defaults = (uni?.default_values as Record<string, string>) || {};
-
-        for (const lead of leads) {
-          await supabase.from('leads').insert({
-            university_id: universityId,
-            batch_id: batch.id,
+        const tasks = leads.map((lead) => ({
+          universityId,
+          batchId: batch.id,
+          sourceLabel: 'Google Lead Ads',
+          leadData: {
             name: lead.name || defaults.name || 'Google Lead',
             email: lead.email || defaults.email || '',
             mobile: lead.mobile || defaults.mobile || '',
             city: lead.city || defaults.city || '',
             state: lead.state || defaults.state || '',
             course: lead.course || defaults.course || '',
-            lead_source: lead.lead_source || uni?.source || 'Google Lead Ads',
-            lead_medium: lead.lead_medium || uni?.medium || 'paid',
-            lead_campaign: lead.lead_campaign || uni?.campaign || 'Google Campaign',
-            status: 'pending',
-          });
-        }
-
-        // Trigger processing
-        await supabase.functions.invoke('process-queue', {
-          body: { batchId: batch.id, universityId },
+            leadSource: lead.lead_source || uni?.source || 'Google Lead Ads',
+            leadMedium: lead.lead_medium || uni?.medium || 'paid',
+            leadCampaign: lead.lead_campaign || uni?.campaign || 'Google Campaign',
+          },
+          apiConfig: {
+            apiUrl: uni?.api_url || '',
+            secretKey: uni?.secret_key || '',
+            collegeId: uni?.college_id || '',
+            source: uni?.source || 'Google Lead Ads',
+            medium: uni?.medium || 'paid',
+            campaign: uni?.campaign || 'Google Campaign',
+            apiType: uni?.api_type || 'nopaperforms',
+            columnMapping: uni?.column_mapping || {},
+            customHeaders: uni?.custom_headers || {},
+            authType: uni?.auth_type,
+            authHeaderKey: uni?.auth_header_key,
+            authHeaderValue: uni?.auth_header_value,
+            payloadWrapper: uni?.payload_wrapper,
+            universityDefaults: defaults,
+            apiTimeoutSeconds: uni?.api_timeout_seconds,
+          },
+        }));
+        await supabase.functions.invoke('process-lead', {
+          body: { tasks, concurrency: 1 },
         });
+        await supabase
+          .from('upload_batches')
+          .update({ status: 'completed', completed_at: new Date().toISOString(), processed_count: leads.length, current_lead_index: leads.length })
+          .eq('id', batch.id);
       }
     }
-
-    // Log
-    await supabase.from('api_logs').insert({
-      status: 'Success',
-      source: 'Google Lead Ads',
-      trigger_point: 'Google Webhook',
-      response: `Received ${leads.length} leads`,
-      lead_data: body,
-      university_id: universityId || '00000000-0000-0000-0000-000000000000',
-    });
 
     return new Response(
       JSON.stringify({ success: true, leads_received: leads.length }),

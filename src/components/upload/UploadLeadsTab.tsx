@@ -1811,9 +1811,8 @@ export function UploadLeadsTab({
         is_cancelled: false,
         processed_count: 0,
         current_lead_index: 0,
-        source_label: sourceLabel.trim() || null,
       })
-      .select()
+      .select("id")
       .single();
 
     if (error) throw new Error(`Failed to create batch: ${error.message}`);

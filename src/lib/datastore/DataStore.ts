@@ -304,7 +304,7 @@ class DataStore {
       // Fetch universities from server
       const { data: serverUniversities, error } = await supabase
         .from('universities')
-        .select('*')
+        .select('id,name,api_url,college_id,secret_key,source,medium,campaign,leads_per_minute,api_type,column_mapping,created_at,updated_at')
         .order('created_at', { ascending: false });
 
       if (error) throw error;

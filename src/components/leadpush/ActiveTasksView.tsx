@@ -18,9 +18,12 @@ interface BatchTask {
   total_leads: number;
   success_count: number;
   fail_count: number;
+  duplicate_count?: number;
   status: string;
   is_paused: boolean;
   is_cancelled: boolean;
+  processed_count?: number | null;
+  current_lead_index?: number | null;
   created_at: string;
   completed_at: string | null;
   user_id: string;
@@ -28,6 +31,26 @@ interface BatchTask {
   university_name?: string;
   leads_per_minute?: number;
 }
+
+const ACTIVE_TASK_BATCH_COLUMNS = [
+  'id',
+  'university_id',
+  'user_id',
+  'file_name',
+  'total_leads',
+  'success_count',
+  'fail_count',
+  'duplicate_count',
+  'status',
+  'is_paused',
+  'is_cancelled',
+  'processed_count',
+  'current_lead_index',
+  'created_at',
+  'completed_at',
+  'leads_per_minute',
+  'scheduled_at',
+].join(',');
 
 // Caches to avoid repeated lookups
 const uniCache = new Map<string, string>();
@@ -45,7 +68,7 @@ function ActiveTasksViewInner() {
     try {
       const { data, error } = await supabase
         .from('upload_batches')
-        .select('*')
+        .select(ACTIVE_TASK_BATCH_COLUMNS)
         .in('status', ['processing', 'pending', 'paused', 'scheduled'])
         .order('created_at', { ascending: false })
         .limit(100);

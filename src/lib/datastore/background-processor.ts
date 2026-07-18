@@ -4,6 +4,14 @@ import type { UploadEntity, UploadLeadEntity, BackgroundTask } from './types';
 import { supabase } from '@/integrations/supabase/client';
 
 type ProcessorCallback = (event: ProcessorEvent) => void;
+const MAX_STORED_RESPONSE_CHARS = 500;
+
+function summarizeStoredResponse(value: string): string {
+  if (!value) return "";
+  return value.length > MAX_STORED_RESPONSE_CHARS
+    ? `${value.slice(0, MAX_STORED_RESPONSE_CHARS)}... [truncated]`
+    : value;
+}
 
 interface ProcessorEvent {
   type: 'progress' | 'lead-complete' | 'upload-complete' | 'error' | 'paused' | 'resumed';
@@ -183,7 +191,7 @@ class BackgroundProcessor {
             .from('leads')
             .update({
               status: result.success ? 'success' : 'failed',
-              api_response: result.response,
+              api_response: summarizeStoredResponse(result.response),
               processed_at: new Date().toISOString(),
             })
             .eq('id', lead.id),

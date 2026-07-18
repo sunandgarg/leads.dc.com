@@ -189,8 +189,12 @@ export function MultiPushView({ universities }: MultiPushViewProps) {
             university_id: uni.id,
             status: 'processing',
             user_id: user?.id || null,
+            is_paused: false,
+            is_cancelled: false,
+            processed_count: 0,
+            current_lead_index: 0,
           })
-          .select()
+          .select('id')
           .single()
           .then((r) => ({ uniId: uni.id, batchId: r.data?.id })),
       ),

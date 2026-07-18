@@ -308,8 +308,12 @@ export function SingleLeadForm({ university, onClose, onSuccess }: SingleLeadFor
           file_name: `Single Lead - ${formData.name || formData.email}`,
           total_leads: 1,
           status: 'processing',
+          is_paused: false,
+          is_cancelled: false,
+          processed_count: 0,
+          current_lead_index: 0,
         })
-        .select()
+        .select('id')
         .single();
 
       if (batchError) throw batchError;

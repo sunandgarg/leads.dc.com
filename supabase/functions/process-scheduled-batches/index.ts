@@ -9,6 +9,14 @@ const corsHeaders = {
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(supabaseUrl, supabaseKey);
+const MAX_STORED_RESPONSE_CHARS = 500;
+
+function summarizeStoredResponse(value: string): string {
+  if (!value) return "";
+  return value.length > MAX_STORED_RESPONSE_CHARS
+    ? `${value.slice(0, MAX_STORED_RESPONSE_CHARS)}... [truncated]`
+    : value;
+}
 
 function parseJsonLike<T>(value: unknown, fallback: T): T {
   if (typeof value === "string") {
@@ -429,7 +437,7 @@ async function processOneLead(
     .from("leads")
     .update({
       status: status.toLowerCase(),
-      api_response: responseBody,
+      api_response: summarizeStoredResponse(responseBody),
       processed_at: new Date().toISOString(),
     })
     .eq("id", lead.id);
@@ -456,7 +464,7 @@ Deno.serve(async (req) => {
     // Find scheduled batches that are due
     const { data: batches, error: batchError } = await supabase
       .from("upload_batches")
-      .select("*")
+      .select("id,university_id,status,is_paused,is_cancelled,processed_count,current_lead_index,source_label,api_config,scheduled_at")
       .eq("status", "scheduled")
       .lte("scheduled_at", now)
       .eq("is_cancelled", false)
@@ -490,7 +498,7 @@ Deno.serve(async (req) => {
       // Get pending leads for this batch
       const { data: leads, error: leadsError } = await supabase
         .from("leads")
-        .select("*")
+        .select("id,extra_data,name,email,mobile,address,state,city,course,specialization,lead_source,lead_medium,lead_campaign")
         .eq("batch_id", batch.id)
         .eq("status", "pending")
         .order("created_at", { ascending: true })
@@ -500,7 +508,7 @@ Deno.serve(async (req) => {
         // Check if all leads are done
         const { count } = await supabase
           .from("leads")
-          .select("*", { count: "exact", head: true })
+          .select("id", { count: "exact", head: true })
           .eq("batch_id", batch.id)
           .eq("status", "pending");
 
@@ -607,7 +615,7 @@ Deno.serve(async (req) => {
                   .from("leads")
                   .update({
                     status: leadStatus,
-                    api_response: result?.response || "No response",
+                    api_response: summarizeStoredResponse(result?.response || "No response"),
                     processed_at: new Date().toISOString(),
                   })
                   .eq("id", lead.id);
@@ -640,7 +648,7 @@ Deno.serve(async (req) => {
       // Check if batch is complete
       const { count: remainingCount } = await supabase
         .from("leads")
-        .select("*", { count: "exact", head: true })
+        .select("id", { count: "exact", head: true })
         .eq("batch_id", batch.id)
         .eq("status", "pending");
 

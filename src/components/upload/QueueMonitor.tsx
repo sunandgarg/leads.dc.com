@@ -25,10 +25,31 @@ interface BatchInfo {
   is_paused: boolean;
   is_cancelled: boolean;
   created_at: string;
+  completed_at?: string | null;
+  processed_count?: number | null;
+  current_lead_index?: number | null;
   user_id: string;
   user_email?: string;
   university_name?: string;
 }
+
+const QUEUE_BATCH_COLUMNS = [
+  "id",
+  "university_id",
+  "user_id",
+  "file_name",
+  "total_leads",
+  "success_count",
+  "fail_count",
+  "duplicate_count",
+  "status",
+  "is_paused",
+  "is_cancelled",
+  "processed_count",
+  "current_lead_index",
+  "created_at",
+  "completed_at",
+].join(",");
 
 const stringifyBatchValue = (value: unknown): string => {
   if (typeof value === "string") return value.trim();
@@ -68,7 +89,7 @@ function QueueMonitorInner() {
 
         let query = supabase
           .from("upload_batches")
-          .select("*")
+          .select(QUEUE_BATCH_COLUMNS)
           .order("created_at", { ascending: false })
           .limit(50);
 

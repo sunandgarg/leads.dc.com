@@ -35,6 +35,41 @@ const toSlug = (name: string): string => {
 };
 
 const INITIAL_LOAD_TIMEOUT_MS = 15_000;
+const UNIVERSITY_LIST_COLUMNS = [
+  'id',
+  'name',
+  'api_url',
+  'college_id',
+  'source',
+  'medium',
+  'campaign',
+  'leads_per_minute',
+  'api_timeout_seconds',
+  'default_push_concurrency',
+  'daily_lead_limit',
+  'status',
+  'api_type',
+  'utm_link',
+  'publisher_panel_url',
+  'publisher_id',
+  'payload_wrapper',
+  'created_at',
+  'updated_at',
+  'daily_pushed_count',
+  'daily_count_reset_at',
+].join(',');
+
+const UNIVERSITY_DETAIL_COLUMNS = [
+  UNIVERSITY_LIST_COLUMNS,
+  'secret_key',
+  'column_mapping',
+  'sample_csv_content',
+  'auth_type',
+  'auth_header_key',
+  'auth_header_value',
+  'custom_headers',
+  'default_values',
+].join(',');
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -144,6 +179,97 @@ const Index = () => {
     }
   }, [activeTab, navigate]);
 
+  const enrichUniversities = useCallback(async (unis: any[]) => {
+    const uniIds = (unis || []).map(u => u.id);
+
+    const [programsRes, stateCitiesRes, coursesRes, customColumnsRes] = await Promise.all([
+      uniIds.length ? supabase.from('programs').select('name, university_id').in('university_id', uniIds) : { data: [] },
+      uniIds.length ? supabase.from('state_cities').select('state, city, university_id').in('university_id', uniIds) : { data: [] },
+      uniIds.length ? supabase.from('course_specializations').select('course, specialization, university_id').in('university_id', uniIds) : { data: [] },
+      uniIds.length
+        ? supabase.from('custom_columns').select('id, column_name, column_key, is_required, sort_order, university_id').in('university_id', uniIds).order('sort_order')
+        : { data: [] },
+    ]);
+
+    const columnIds = (customColumnsRes.data || []).map(c => c.id);
+    const { data: columnValues } = columnIds.length > 0
+      ? await supabase.from('custom_column_values').select('value, parent_value_id, column_id').in('column_id', columnIds)
+      : { data: [] };
+
+    const programsByUni = new Map<string, string[]>();
+    const stateCitiesByUni = new Map<string, any[]>();
+    const coursesByUni = new Map<string, any[]>();
+    const columnsByUni = new Map<string, any[]>();
+
+    (programsRes.data || []).forEach(p => {
+      if (!programsByUni.has(p.university_id)) programsByUni.set(p.university_id, []);
+      programsByUni.get(p.university_id)!.push(p.name);
+    });
+
+    (stateCitiesRes.data || []).forEach(sc => {
+      if (!stateCitiesByUni.has(sc.university_id)) stateCitiesByUni.set(sc.university_id, []);
+      stateCitiesByUni.get(sc.university_id)!.push({ state: sc.state, city: sc.city });
+    });
+
+    (coursesRes.data || []).forEach(c => {
+      if (!coursesByUni.has(c.university_id)) coursesByUni.set(c.university_id, []);
+      coursesByUni.get(c.university_id)!.push({ course: c.course, specialization: c.specialization });
+    });
+
+    const valuesByColumn = new Map<string, any[]>();
+    (columnValues || []).forEach(v => {
+      if (!valuesByColumn.has(v.column_id)) valuesByColumn.set(v.column_id, []);
+      valuesByColumn.get(v.column_id)!.push({ value: v.value, parentValue: undefined });
+    });
+
+    (customColumnsRes.data || []).forEach(col => {
+      if (!columnsByUni.has(col.university_id)) columnsByUni.set(col.university_id, []);
+      columnsByUni.get(col.university_id)!.push({
+        columnKey: col.column_key,
+        columnName: col.column_name,
+        isRequired: col.is_required,
+        sortOrder: col.sort_order,
+        values: valuesByColumn.get(col.id) || [],
+      });
+    });
+
+    return (unis || []).map(uni => ({
+      ...uni,
+      slug: toSlug(uni.name),
+      column_mapping: typeof uni.column_mapping === 'object' && uni.column_mapping !== null ? uni.column_mapping : {},
+      programs: programsByUni.get(uni.id) || [],
+      stateCities: stateCitiesByUni.get(uni.id) || [],
+      courseSpecializations: coursesByUni.get(uni.id) || [],
+      customColumns: columnsByUni.get(uni.id) || [],
+      hasFullDetails: Boolean(uni.hasFullDetails || uni.column_mapping || uni.sample_csv_content || uni.secret_key),
+    }));
+  }, []);
+
+  const fetchUniversityDetails = useCallback(async (id: string) => {
+    const { data, error } = await supabase
+      .from('universities')
+      .select(UNIVERSITY_DETAIL_COLUMNS)
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+
+    const [details] = await enrichUniversities([{ ...data, hasFullDetails: true }]);
+    return details;
+  }, [enrichUniversities]);
+
+  useEffect(() => {
+    if (!selectedUploadUniversity?.id || selectedUploadUniversity.hasFullDetails) return;
+
+    fetchUniversityDetails(selectedUploadUniversity.id)
+      .then((detailedUniversity) => {
+        setSelectedUploadUniversityState(detailedUniversity);
+        setUniversitiesState((current) => current.map((item) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+        appCache.setUniversities((appCache.universities || []).map((item: any) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+      })
+      .catch((error) => console.error('Error loading selected university details:', error));
+  }, [fetchUniversityDetails, selectedUploadUniversity?.id, selectedUploadUniversity?.hasFullDetails]);
+
   useEffect(() => {
     if (adminAuthLoading || isAdmin) return;
 
@@ -159,93 +285,29 @@ const Index = () => {
     try {
       const { data: unis, error } = await supabase
         .from('universities')
-        .select('*')
+        .select(UNIVERSITY_LIST_COLUMNS)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
 
-      // Batch fetch related data for performance
-      const uniIds = (unis || []).map(u => u.id);
-      
-      const [programsRes, stateCitiesRes, coursesRes, customColumnsRes] = await Promise.all([
-        supabase.from('programs').select('name, university_id').in('university_id', uniIds),
-        supabase.from('state_cities').select('state, city, university_id').in('university_id', uniIds),
-        supabase.from('course_specializations').select('course, specialization, university_id').in('university_id', uniIds),
-        supabase.from('custom_columns').select('id, column_name, column_key, is_required, sort_order, university_id').in('university_id', uniIds).order('sort_order'),
-      ]);
-
-      // Fetch custom column values
-      const columnIds = (customColumnsRes.data || []).map(c => c.id);
-      const { data: columnValues } = columnIds.length > 0 
-        ? await supabase.from('custom_column_values').select('value, parent_value_id, column_id').in('column_id', columnIds)
-        : { data: [] };
-
-      // Group data by university ID
-      const programsByUni = new Map<string, string[]>();
-      const stateCitiesByUni = new Map<string, any[]>();
-      const coursesByUni = new Map<string, any[]>();
-      const columnsByUni = new Map<string, any[]>();
-
-      (programsRes.data || []).forEach(p => {
-        if (!programsByUni.has(p.university_id)) programsByUni.set(p.university_id, []);
-        programsByUni.get(p.university_id)!.push(p.name);
-      });
-
-      (stateCitiesRes.data || []).forEach(sc => {
-        if (!stateCitiesByUni.has(sc.university_id)) stateCitiesByUni.set(sc.university_id, []);
-        stateCitiesByUni.get(sc.university_id)!.push({ state: sc.state, city: sc.city });
-      });
-
-      (coursesRes.data || []).forEach(c => {
-        if (!coursesByUni.has(c.university_id)) coursesByUni.set(c.university_id, []);
-        coursesByUni.get(c.university_id)!.push({ course: c.course, specialization: c.specialization });
-      });
-
-      const valuesByColumn = new Map<string, any[]>();
-      (columnValues || []).forEach(v => {
-        if (!valuesByColumn.has(v.column_id)) valuesByColumn.set(v.column_id, []);
-        valuesByColumn.get(v.column_id)!.push({ value: v.value, parentValue: undefined });
-      });
-
-      (customColumnsRes.data || []).forEach(col => {
-        if (!columnsByUni.has(col.university_id)) columnsByUni.set(col.university_id, []);
-        columnsByUni.get(col.university_id)!.push({
-          columnKey: col.column_key,
-          columnName: col.column_name,
-          isRequired: col.is_required,
-          sortOrder: col.sort_order,
-          values: valuesByColumn.get(col.id) || [],
-        });
-      });
-
-      const enrichedUnis = (unis || []).map(uni => ({
-        ...uni,
-        slug: toSlug(uni.name),
-        column_mapping: typeof uni.column_mapping === 'object' && uni.column_mapping !== null ? uni.column_mapping : {},
-        programs: programsByUni.get(uni.id) || [],
-        stateCities: stateCitiesByUni.get(uni.id) || [],
-        courseSpecializations: coursesByUni.get(uni.id) || [],
-        customColumns: columnsByUni.get(uni.id) || [],
-      }));
-
-      setUniversities(enrichedUnis);
+      setUniversities(await enrichUniversities(unis || []));
     } catch (error) {
       console.error('Error fetching universities:', error);
       toast({ title: 'Error', description: 'Failed to fetch universities', variant: 'destructive' });
     }
-  }, [toast, setUniversities]);
+  }, [enrichUniversities, toast, setUniversities]);
 
   const fetchLogs = useCallback(async () => {
     try {
       const [logsRes, batchesRes] = await Promise.all([
         supabase
           .from('api_logs')
-          .select('*')
+          .select('id, created_at, status, university_id, lead_id, email, mobile, source, source_label, trigger_point, response')
           .order('created_at', { ascending: false })
           .limit(500),
         supabase
           .from('upload_batches')
-          .select('*')
+          .select('id, university_id, file_name, total_leads, success_count, fail_count, duplicate_count, status, created_at, user_id, is_paused, is_cancelled, completed_at')
           .order('created_at', { ascending: false })
           .limit(100)
       ]);
@@ -428,39 +490,43 @@ const Index = () => {
     }
   };
 
-  const handleEditUniversity = useCallback((uni: any) => {
+  const handleEditUniversity = useCallback(async (uni: any) => {
+    const detailedUniversity = uni.hasFullDetails ? uni : await fetchUniversityDetails(uni.id);
+
     setEditingUniversity({
-      id: uni.id,
-      name: uni.name,
-      apiUrl: uni.api_url,
-      collegeId: uni.college_id,
-      secretKey: uni.secret_key,
-      source: uni.source || 'dekhocampus',
-      medium: uni.medium || 'dekhocampus',
-      campaign: uni.campaign || 'API',
-      leadsPerMinute: uni.leads_per_minute || 90,
-      apiTimeoutSeconds: uni.api_timeout_seconds ?? 30,
-      defaultPushConcurrency: uni.default_push_concurrency ?? 2,
-      dailyLeadLimit: uni.daily_lead_limit ?? null,
-      status: (uni.status === 'disabled' ? 'disabled' : 'live'),
-      apiType: uni.api_type || 'nopaperforms',
-      utmLink: uni.utm_link || '',
-      publisherPanelUrl: uni.publisher_panel_url || '',
-      publisherId: uni.publisher_id || '',
-      authType: uni.auth_type || 'secret_key',
-      authHeaderKey: uni.auth_header_key || 'Authorization',
-      authHeaderValue: uni.auth_header_value || '',
-      payloadWrapper: uni.payload_wrapper || 'object',
-      customHeaders: uni.custom_headers || {},
-      programs: uni.programs || [],
-      stateCities: uni.stateCities || [],
-      courseSpecializations: uni.courseSpecializations || [],
-      columnMapping: uni.column_mapping || {},
-      sampleCsvContent: uni.sample_csv_content || '',
+      id: detailedUniversity.id,
+      name: detailedUniversity.name,
+      apiUrl: detailedUniversity.api_url,
+      collegeId: detailedUniversity.college_id,
+      secretKey: detailedUniversity.secret_key,
+      source: detailedUniversity.source || 'dekhocampus',
+      medium: detailedUniversity.medium || 'dekhocampus',
+      campaign: detailedUniversity.campaign || 'API',
+      leadsPerMinute: detailedUniversity.leads_per_minute || 90,
+      apiTimeoutSeconds: detailedUniversity.api_timeout_seconds ?? 30,
+      defaultPushConcurrency: detailedUniversity.default_push_concurrency ?? 2,
+      dailyLeadLimit: detailedUniversity.daily_lead_limit ?? null,
+      status: (detailedUniversity.status === 'disabled' ? 'disabled' : 'live'),
+      apiType: detailedUniversity.api_type || 'nopaperforms',
+      utmLink: detailedUniversity.utm_link || '',
+      publisherPanelUrl: detailedUniversity.publisher_panel_url || '',
+      publisherId: detailedUniversity.publisher_id || '',
+      authType: detailedUniversity.auth_type || 'secret_key',
+      authHeaderKey: detailedUniversity.auth_header_key || 'Authorization',
+      authHeaderValue: detailedUniversity.auth_header_value || '',
+      payloadWrapper: detailedUniversity.payload_wrapper || 'object',
+      customHeaders: detailedUniversity.custom_headers || {},
+      programs: detailedUniversity.programs || [],
+      stateCities: detailedUniversity.stateCities || [],
+      courseSpecializations: detailedUniversity.courseSpecializations || [],
+      columnMapping: detailedUniversity.column_mapping || {},
+      sampleCsvContent: detailedUniversity.sample_csv_content || '',
     });
-    navigate(`/lead-push/universities/edit/${uni.slug || uni.id}`);
+    setUniversitiesState((current) => current.map((item) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+    appCache.setUniversities((appCache.universities || []).map((item: any) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+    navigate(`/lead-push/universities/edit/${detailedUniversity.slug || detailedUniversity.id}`);
     setIsEditModalOpen(true);
-  }, [navigate]);
+  }, [fetchUniversityDetails, navigate]);
 
   const closeEditModal = useCallback(() => {
     navigate('/lead-push/universities');
@@ -540,7 +606,9 @@ const Index = () => {
   useEffect(() => {
     setSelectedUploadUniversityState((current) => {
       if (!current?.id) return current;
-      return universities.find((university) => university.id === current.id) || current;
+      const refreshed = universities.find((university) => university.id === current.id);
+      if (!refreshed) return current;
+      return current.hasFullDetails && !refreshed.hasFullDetails ? current : refreshed;
     });
   }, [universities]);
 
@@ -597,11 +665,23 @@ const Index = () => {
     }
   };
 
-  const handleSelectUploadUniversity = useCallback((uni: any) => {
+  const handleSelectUploadUniversity = useCallback(async (uni: any) => {
     setSelectedUploadUniversityState(uni);
     const slug = uni.slug || uni.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
     appCache.setUploadSelectedUniversity(slug);
-  }, []);
+
+    if (!uni.hasFullDetails) {
+      try {
+        const detailedUniversity = await fetchUniversityDetails(uni.id);
+        setSelectedUploadUniversityState(detailedUniversity);
+        setUniversitiesState((current) => current.map((item) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+        appCache.setUniversities((appCache.universities || []).map((item: any) => (item.id === detailedUniversity.id ? detailedUniversity : item)));
+      } catch (error) {
+        console.error('Error fetching university details:', error);
+        toast({ title: 'Error', description: 'Failed to load university configuration', variant: 'destructive' });
+      }
+    }
+  }, [fetchUniversityDetails, toast]);
 
   const handleBulkImport = useCallback(async (configs: any[]) => {
     // Every scalar/jsonb column on public.universities (excluding auto-managed id/created_at/updated_at
